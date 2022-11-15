@@ -1,17 +1,17 @@
 import cscore
 import json
 import math
-import numbers
 import os
 from threading import Thread
 from networktables import NetworkTables
 import numpy as np
 import cv2
+import time
 
 #camera calibration constants (fixme?)
 K=np.array([[1485.8200576708696, 0.0, 640.0], [0.0, 1505.6488713912988, 360.0], [0.0, 0.0, 1.0]])
 D=np.array([[-0.28188393137315854], [2.512062461064215], [58.28060026590924], [-949.3977111921688]])
-
+DIM = (360, 640, 3)
 K_inv = np.linalg.inv(K)
 
 try:
@@ -32,148 +32,30 @@ def main():
     camera = cscore.UsbCamera("Main",0)
     cvSink = cscore.CvSink("Video In")
     with open("./config.json","r") as f:
-        print(json.dumps(json.load(f)))
-        camera.setConfigJson("""{
-    "height": 720,
-    "width": 1280,
-    "properties": [
-        {
-            "name": "connect_verbose",
-            "value": 0
-        },
-        {
-            "name": "brightness",
-            "value": 33
-        },
-        {
-            "name": "contrast",
-            "value": 100
-        },
-        {
-            "name": "saturation",
-            "value": 50
-        },
-        {
-            "name": "red_balance",
-            "value": 1000
-        },
-        {
-            "name": "blue_balance",
-            "value": 1000
-        },
-        {
-            "name": "horizontal_flip",
-            "value": true
-        },
-        {
-            "name": "vertical_flip",
-            "value": true
-        },
-        {
-            "name": "power_line_frequency",
-            "value": 1
-        },
-        {
-            "name": "sharpness",
-            "value": 100
-        },
-        {
-            "name": "color_effects",
-            "value": 0
-        },
-        {
-            "name": "rotate",
-            "value": 0
-        },
-        {
-            "name": "color_effects_cbcr",
-            "value": 32896
-        },
-        {
-            "name": "video_bitrate_mode",
-            "value": 1
-        },
-        {
-            "name": "video_bitrate",
-            "value": 25000000
-        },
-        {
-            "name": "repeat_sequence_header",
-            "value": false
-        },
-        {
-            "name": "h264_i_frame_period",
-            "value": 60
-        },
-        {
-            "name": "h264_level",
-            "value": 11
-        },
-        {
-            "name": "h264_profile",
-            "value": 4
-        },
-        {
-            "name": "auto_exposure",
-            "value": 0
-        },
-        {
-            "name": "exposure_time_absolute",
-            "value": 9
-        },
-        {
-            "name": "exposure_dynamic_framerate",
-            "value": false
-        },
-        {
-            "name": "auto_exposure_bias",
-            "value": 12
-        },
-        {
-            "name": "white_balance_auto_preset",
-            "value": 1
-        },
-        {
-            "name": "image_stabilization",
-            "value": false
-        },
-        {
-            "name": "iso_sensitivity",
-            "value": 0
-        },
-        {
-            "name": "iso_sensitivity_auto",
-            "value": 1
-        },
-        {
-            "name": "exposure_metering_mode",
-            "value": 0
-        },
-        {
-            "name": "scene_mode",
-            "value": 0
-        },
-        {
-            "name": "compression_quality",
-            "value": 100
-        }
-    ]
-}""")
+        opt = json.load(f)
+        opt["height"] = DIM[0]
+        opt["width"] = DIM[1]
+        print(json.dumps(opt))
+        camera.setConfigJson(json.dumps(opt))
     cvSink.setSource(camera)
     cvSinkThreaded = ThreadedCvSink(cvSink).start()
+    time.sleep(1) # give the sink time to start
 
-    outputStream = cs.putVideo("MainOut", 1280, 720)
+    outputStream = cs.putVideo("MainOut", DIM[1], DIM[0])
     
-    img = np.zeros(shape=(720, 1280, 3), dtype=np.uint8)
+    img = np.zeros(shape=DIM, dtype=np.uint8)
     detector = apriltag.Detector(apriltag.DetectorOptions(families='tag36h11'))
 
     print("starting main vision loop...")
 
+    t0 = time.perf_counter()
+    n = 0
     while True:
       # Tell the CvSink to grab a frame from the camera and put it
       # in the source image.  If there is an error notify the output.
-        time, img = cvSinkThreaded.grabFrame()
-        if time == 0: 
+        n += 1
+        t, img = cvSinkThreaded.grabFrame()
+        if t == 0: 
          # Send the output the error.
             outputStream.notifyError(cvSink.getError())
          # skip the rest of the current iteration
@@ -181,15 +63,21 @@ def main():
         res = detector.detect(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
 
         if len(res) == 0:
-            cv2.putText(img, "No Tags Found!", (0,25), cv2.FONT_HERSHEY_SIMPLEX, .5, (0,0,255), 2)
+            cv2.putText(img, "No Tags Found!", (0,50), cv2.FONT_HERSHEY_SIMPLEX, .5, (0,0,255), 2)
+        else:
+            cv2.putText(img, "Tags Found:" + str(len(res)), (0,50), cv2.FONT_HERSHEY_SIMPLEX, .5, (255,255,0), 2)
         for r in res:
             (cA, cB, cC, cD) = r.corners
             (cX, cY) = (r.center[0], r.center[1])
             (tx, ty) = getAnglesFromPixels(K, D, (cX, cY))
             cv2.circle(img, (int(cX), int(cY)), 5, (255, 255, 0), -1)
             cv2.putText(img, str((round(tx,2), round(ty,2))), (int(cD[0]), int(cD[1])),cv2.FONT_HERSHEY_SIMPLEX, .5, (255,255,0), 2)
-
-        outputStream.putFrame(img)
+        t1 = time.perf_counter()
+        fps = 1/(t1-t0)
+        t0 = t1
+        cv2.putText(img, "process FPS: " + str(round(fps,2)) + ", IO FPS: " + str(round(cvSinkThreaded.fps,2)), (0,25), cv2.FONT_HERSHEY_SIMPLEX, .5, (255,255,0), 2)
+        if (n%10 == 0):
+            outputStream.putFrame(img)
 
 
 def radiansToDegrees(theta):
@@ -215,8 +103,10 @@ class ThreadedCvSink:
     def __init__(self,cvSink):
         self.cvSink = cvSink
         self.stopped = False
-        self.img = np.zeros(shape=(720, 1280, 3), dtype=np.uint8)
+        self.img = np.zeros(shape=DIM, dtype=np.uint8)
         self.time = 0
+        self.t0 = time.perf_counter()
+        self.newFrame = False
     def start(self):
         Thread(target=self.update, args=()).start()
         return self
@@ -225,7 +115,14 @@ class ThreadedCvSink:
             if self.stopped:
                 return
             self.time,self.img = self.cvSink.grabFrame(self.img)
+            t1 = time.perf_counter()
+            self.newFrame = True
+            self.fps = 1/(t1-self.t0)
+            self.t0 = t1
     def grabFrame(self):
+        if not self.newFrame:
+            print("process faster than io!")
+        self.newFrame = False
         return (self.time,self.img)
     def stop(self):
         self.stopped = True
